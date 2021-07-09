@@ -41,10 +41,22 @@ run_integrated_learner_CV<-function(feature_table,
                                     meta_learner = 'SL.BART', # Meta learner for stacked generalization.
                                     run_concat = TRUE, # Should vanilla concatenated base learner be run? Default is TRUE.
                                     run_stacked = TRUE, # Should stacked model be run? Default is TRUE.
-                                    verbose = TRUE # Should detailed message be printed? Default is TRUE.
+                                    verbose = TRUE, # Should detailed message be printed? Default is TRUE.
+                                    family=gaussian()
 ){ 
-                                          
-  
+
+# 
+#   feature_table_valid = pcl.test$feature_table; # Feature table from validation set. Must have the exact same structure as feature_table. If missing, uses feature_table for feature_table_valid.
+#   sample_metadata_valid = pcl.test$sample_metadata; # Sample-specific metadata table from independent validation set. Must have the exact same structure as sample_metadata.
+#   folds = 5; # How many folds in the V-fold CV? Defaul is 10.
+#   seed = 1234; # Specify the arbitrary seed value for reproducibility. Default is 1234.
+#   base_learner = 'SL.BART'; # Base learner for single layers and concatenation.
+#   meta_learner = 'SL.BART'; # Meta learner for stacked generalization.
+#   run_concat = TRUE; # Should vanilla concatenated base learner be run? Default is TRUE.
+#   run_stacked = TRUE; # Should stacked model be run? Default is TRUE.
+#   verbose = TRUE; # Should detailed message be printed? Default is TRUE.
+#   family = binomial()
+# 
   #######################
   # Basic sanity checks #
   #######################
@@ -98,7 +110,7 @@ run_integrated_learner_CV<-function(feature_table,
       stop("sample_metadata_valid must have a column named 'Y' describing the outcome of interest.")
     }
   }
-    
+  
   #############################################################################################
   # Extract validation Y right away (will not be used anywhere during the validation process) #
   #############################################################################################
@@ -121,7 +133,7 @@ run_integrated_learner_CV<-function(feature_table,
   subjectCvFoldsIN <- caret::createFolds(1:length(subjectID), k = folds, returnTrain=TRUE)
   
   ########################################
-  # Curate subect-level samples per fold #
+  # Curate subject-level samples per fold #
   ########################################
   
   obsIndexIn <- vector("list", folds) 
@@ -136,7 +148,7 @@ run_integrated_learner_CV<-function(feature_table,
   ###############################
   
   cvControl = list(V = folds, shuffle = FALSE, validRows = obsIndexIn)
-
+  
   #################################################
   # Stacked generalization input data preparation #
   #################################################
@@ -144,8 +156,10 @@ run_integrated_learner_CV<-function(feature_table,
   feature_metadata$featureType<-as.factor(feature_metadata$featureType)
   name_layers<-with(droplevels(feature_metadata), list(levels = levels(featureType)), nlevels = nlevels(featureType))$levels
   SL_fit_predictions<-vector("list", length(name_layers))
-  SL_fit_layers<-vector("list", length(name_layers)) 
+  SL_fit_layers<-vector("list", length(name_layers))
+  SL_fit_layers_train<-vector("list", length(name_layers))
   names(SL_fit_layers)<-name_layers
+  names(SL_fit_layers_train)<-name_layers
   names(SL_fit_predictions)<-name_layers
   
   #####################################################################
@@ -182,7 +196,8 @@ run_integrated_learner_CV<-function(feature_table,
                                                      X = X, 
                                                      cvControl = cvControl,    
                                                      verbose = verbose, 
-                                                     SL.library = base_learner) 
+                                                     SL.library = base_learner,
+                                                     family = family) 
     
     ###################################################
     # Append the corresponding y and X to the results #
@@ -197,9 +212,9 @@ run_integrated_learner_CV<-function(feature_table,
     # Remove redundant data frames and ave pre-stack predictions #
     ##############################################################
     
+    SL_fit_predictions[[i]]<-SL_fit_layers[[i]]$Z
     rm(t_dat_slice); rm(dat_slice); rm(X)
-    SL_fit_predictions[[i]]<-SL_fit_layers[[i]]$SL.predict
-  
+    #SL_fit_predictions[[i]]<-SL_fit_layers[[i]]$SL.predict  
     ############################################################
     # Prepate single-omic validation data and save predictions #
     ############################################################
@@ -207,16 +222,17 @@ run_integrated_learner_CV<-function(feature_table,
     if (!is.null(feature_table_valid)){
       t_dat_slice_valid<-feature_table_valid[rownames(feature_table_valid) %in% include_list$featureID, ]
       dat_slice_valid<-as.data.frame(t(t_dat_slice_valid))
-      layer_wise_prediction_valid[[i]]<-predict.SuperLearner(SL_fit_layers[[i]], newdata = dat_slice_valid)$pred
+      layer_wise_prediction_valid[[i]]<- predict.SuperLearner(SL_fit_layers[[i]], newdata = dat_slice_valid)$pred
       rownames(layer_wise_prediction_valid[[i]])<-rownames(dat_slice_valid)
       SL_fit_layers[[i]]$validX<-dat_slice_valid
       SL_fit_layers[[i]]$validPrediction<-layer_wise_prediction_valid[[i]]
       colnames(SL_fit_layers[[i]]$validPrediction)<-'validPrediction'
       rm(dat_slice_valid); rm(include_list)
     }
+    
   }
   
-
+  
   ####################
   # Stack all models #
   ####################
@@ -236,11 +252,13 @@ run_integrated_learner_CV<-function(feature_table,
     # Run user-specified meta learner #
     ###################################
     
-    SL_fit_stacked<- SuperLearner::SuperLearner(Y = Y, 
-                                                X = combo, 
-                                                cvControl = cvControl,    
-                                                verbose = verbose, 
-                                                SL.library = meta_learner) 
+
+    SL_fit_stacked<- SuperLearner::SuperLearner(Y = Y,
+                                                X = combo,
+                                                cvControl = cvControl,
+                                                verbose = verbose,
+                                                SL.library = meta_learner,
+                                                family = family)
     
     
     ###################################################
@@ -249,6 +267,8 @@ run_integrated_learner_CV<-function(feature_table,
     
     SL_fit_stacked$Y<-sample_metadata['Y']
     SL_fit_stacked$X<-combo
+    
+    
     if (!is.null(sample_metadata_valid)) SL_fit_stacked$validY<-validY
     
     #################################################################
@@ -258,7 +278,7 @@ run_integrated_learner_CV<-function(feature_table,
     if (!is.null(feature_table_valid)){
       combo_valid <- as.data.frame(do.call(cbind, layer_wise_prediction_valid))
       names(combo_valid)<-name_layers
-      stacked_prediction_valid<-predict.SuperLearner(SL_fit_stacked, newdata = combo_valid)$pred
+      stacked_prediction_valid<- predict.SuperLearner(SL_fit_stacked, newdata = combo_valid)$pred
       rownames(stacked_prediction_valid)<-rownames(combo_valid)
       SL_fit_stacked$validX<-combo_valid
       SL_fit_stacked$validPrediction<-stacked_prediction_valid
@@ -284,10 +304,11 @@ run_integrated_learner_CV<-function(feature_table,
     ###################################
     
     SL_fit_concat<-SuperLearner::SuperLearner(Y = Y, 
-                                              X = fulldat, 
+                                              X = fulldat,  
                                               cvControl = cvControl,    
                                               verbose = verbose, 
-                                              SL.library = base_learner) 
+                                              SL.library = base_learner,
+                                              family = family) 
     
     ###################################################
     # Append the corresponding y and X to the results #
@@ -298,7 +319,7 @@ run_integrated_learner_CV<-function(feature_table,
     if (!is.null(sample_metadata_valid)) SL_fit_concat$validY<-validY
     
     #########################################################################
-    # Prepate concatenated input data for validaton set and save prediction #
+    # Prepare concatenated input data for validaton set and save prediction #
     #########################################################################
     
     if (!is.null(feature_table_valid)){
@@ -310,7 +331,7 @@ run_integrated_learner_CV<-function(feature_table,
       colnames(SL_fit_concat$validPrediction)<-'validPrediction'
     }
   }
-           
+  
   
   ######################
   # Save model results #
@@ -320,15 +341,15 @@ run_integrated_learner_CV<-function(feature_table,
     SL_fits<-list(SL_fit_layers = SL_fit_layers, 
                   SL_fit_stacked = SL_fit_stacked,
                   SL_fit_concat = SL_fit_concat)
-    } else if (run_concat & !run_stacked){
-      SL_fits<-list(SL_fit_layers = SL_fit_layers, 
-                    SL_fit_concat = SL_fit_concat)
-      } else if (!run_concat & run_stacked){
-        SL_fits<-list(SL_fit_layers = SL_fit_layers, 
-                      SL_fit_stacked = SL_fit_stacked)
-        } else{ 
-          SL_fits<-list(SL_fit_layers = SL_fit_layers)
-          }
+  } else if (run_concat & !run_stacked){
+    SL_fits<-list(SL_fit_layers = SL_fit_layers, 
+                  SL_fit_concat = SL_fit_concat)
+  } else if (!run_concat & run_stacked){
+    SL_fits<-list(SL_fit_layers = SL_fit_layers, 
+                  SL_fit_stacked = SL_fit_stacked)
+  } else{ 
+    SL_fits<-list(SL_fit_layers = SL_fit_layers)
+  }
   
   
   ##########
@@ -339,11 +360,11 @@ run_integrated_learner_CV<-function(feature_table,
 }  
 
 
-                              
+
 #####################################################################
 # Rename after adding serialize = TRUE in bartMachine2 (from ck37r) #
 #####################################################################
-                              
+
 # Temporary wrapper that needs to be fixed in SuperLearner
 #' Wrapper for bartMachine learner
 #'
@@ -386,13 +407,13 @@ run_integrated_learner_CV<-function(feature_table,
 #' @encoding utf-8
 #' @export
 SL.BART <- function(Y, X, newX, family, obsWeights, id,
-                            num_trees = 50, num_burn_in = 250, verbose = F,
-                            alpha = 0.95, beta = 2, k = 2, q = 0.9, nu = 3,
-                            num_iterations_after_burn_in = 1000,
-                            serialize = TRUE,
-                            ...) {
+                    num_trees = 50, num_burn_in = 250, verbose = F,
+                    alpha = 0.95, beta = 2, k = 2, q = 0.9, nu = 3,
+                    num_iterations_after_burn_in = 1000,
+                    serialize = TRUE,
+                    ...) {
   #.SL.require("bartMachine")
-
+  
   ################
   ### CK changes:
   if (family$family == "binomial") {
@@ -409,11 +430,98 @@ SL.BART <- function(Y, X, newX, family, obsWeights, id,
   # pred returns predicted responses (on the scale of the outcome)
   #pred <- bartMachine:::predict.bartMachine(model, newX)
   pred <- predict(model, newX)
-
+  
   fit <- list(object = model)
-  class(fit) <- c("SL.bartMachine")
-
+  class(fit) <- c("SL.BART")
+  
   out <- list(pred = pred, fit = fit)
   return(out)
 }
+
+predict.SL.BART <- function(object, newdata, family, X = NULL, Y = NULL,...) {
+  #.SL.require("bartMachine")
+  pred <- predict(object$object, newdata)
+  return(pred)
+}
+
+SL.caret.enet <- function(..., method = "glmnet",tuneLength=15) {
+  SL.caret(..., method = method,tuneLength = tuneLength)
+}
+
+SL.glm.wIntercept <- function(Y, X, newX, family, obsWeights, ...){
+  #Fit glm with no intercept
+  fit.glm <- glm(Y ~ -1+.,data=X, family=family)
+  
+  # get predictions on newX object
+  pred <- predict(fit.glm, newdata=newX, type="response")
+  
+  # save the fit object
+  fit <- list(object=fit.glm)
+  
+  # because this is simply a different form of glm, 
+  # we can use predict.SL.glm to get predictions back, 
+  # i.e. no need to write a new predict function
+  class(fit) <- "SL.glm"
+  
+  # out must be list with named objects pred (predictions on newX)
+  # and fit (anything needed to get predictions later)
+  out <- list(pred=pred, fit=fit)
+  return(out)
+}
+
+nnls_nloglik.obj <- function(b,X,Y,family=family,obsWeights){
+  if(family$family=="gaussian"){
+    return((sum(obsWeights*(Y-X%*% b)^2)))
+  }else if(family$family=="binomial"){
+    wavg <- X%*% b
+    pred = ROCR::prediction(wavg, Y)
+    AUC = ROCR::performance(pred, "auc")@y.values[[1]]
+    return((1-AUC))
+    
+    #return(-(sum(obsWeights*Y*log(X%*% b)+obsWeights*(1-Y)*log(1-X%*% b))))
+  }
+}
+
+equal <- function(b,X, Y,family=family,obsWeights){
+  sum(b)
+}
+
+
+SL.nloglik <- function(Y, X, newX, family, obsWeights, ...) {
+  #.SL.require("Rsolnp")
+  nmethods = ncol(X)
+  lower_bounds = rep(0, ncol(X))
+  upper_bounds = rep(1, ncol(X))
+  
+  fit.solnp <- Rsolnp::solnp(rep(1/nmethods,nmethods),nnls_nloglik.obj, eqfun = equal, eqB = 1, 
+                            LB=lower_bounds, UB=upper_bounds,X=as.matrix(X), Y=Y, 
+                            family=family,obsWeights=obsWeights)
+  initCoef <- fit.solnp$pars
+  initCoef[is.na(initCoef)] <- 0
+  if (sum(initCoef) > 0) {
+    coef <- initCoef/sum(initCoef)
+  } else {
+    warning("All algorithms have zero weight", call. = FALSE)
+    coef <- initCoef
+  }
+  pred <- crossprod(t(as.matrix(newX)), coef)
+  fit <- list(object = fit.solnp)
+  class(fit) <- "SL.solnp"
+  out <- list(pred = pred, fit = fit)
+  return(out)
+}
+
+predict.SL.solnp <- function(object, newdata, ...) {
+  initCoef <- object$object$pars
+  initCoef[is.na(initCoef)] <- 0
+  if (sum(initCoef) > 0) {
+    coef <- initCoef/sum(initCoef)
+  } else {
+    warning("All algorithms have zero weight", call. = FALSE)
+    coef <- initCoef
+  }
+  pred <- crossprod(t(as.matrix(newdata)), coef)
+  return(pred)
+}
+
 
